@@ -11,8 +11,9 @@ l = logging.getLogger(name=__name__)
 
 
 class Loop:
-    def __init__(self, entry, entry_edges, break_edges, continue_edges, body_nodes, graph, subloops):
+    def __init__(self, entry, entry_edges, break_edges, continue_edges, body_nodes, graph, subloops, entry_nodes=None):
         self.entry = entry
+        self.entry_nodes = list(entry_nodes) if entry_nodes is not None else [entry]
         self.entry_edges = entry_edges
         self.break_edges = break_edges
         self.continue_edges = continue_edges
@@ -76,30 +77,41 @@ class LoopFinder(Analysis):
         entry_edges = []
         break_edges = []
         continue_edges = []
-        entry_node = None
+        entry_nodes = []
         for node in loop_body_nodes:
             for pred_node in bigg.predecessors(node):
                 if pred_node not in loop_body_nodes:
-                    if entry_node is not None and entry_node != node:
-                        l.warning("Bad loop: more than one entry point (%s, %s)", entry_node, node)
-                        return None, []
-                    entry_node = node
+                    if node not in entry_nodes:
+                        entry_nodes.append(node)
                     entry_edges.append((pred_node, node))
                     subg.add_edge(pred_node, node)
             for succ_node in bigg.successors(node):
                 if succ_node not in loop_body_nodes:
                     break_edges.append((node, succ_node))
                     subg.add_edge(node, succ_node)
-        if entry_node is None:
+        if not entry_nodes:
             entry_node = min(loop_body_nodes, key=lambda n: n.addr)
+            entry_nodes.append(entry_node)
             l.info("Couldn't find entry point, assuming it's the first by address (%s)", entry_node)
+        elif len(entry_nodes) == 1:
+            entry_node = entry_nodes[0]
+        else:
+            # An irreducible (multi-entry) loop, common in obfuscated binaries and firmware. Report it like
+            # any other loop: the canonical header is the entry targeted by the most back edges, with ties
+            # broken by address so the result is deterministic.
+            l.debug("Irreducible loop with multiple entry points: %s", entry_nodes)
+            entry_node = min(
+                entry_nodes,
+                key=lambda n: (-sum(1 for pred in subg.predecessors(n) if pred in loop_body_nodes), n.addr),
+            )
 
         acyclic_subg = subg.copy()
-        for pred_node in subg.predecessors(entry_node):
-            if pred_node in loop_body_nodes:
-                continue_edge = (pred_node, entry_node)
-                acyclic_subg.remove_edge(*continue_edge)
-                continue_edges.append(continue_edge)
+        for entry in entry_nodes:
+            for pred_node in subg.predecessors(entry):
+                if pred_node in loop_body_nodes:
+                    continue_edge = (pred_node, entry)
+                    acyclic_subg.remove_edge(*continue_edge)
+                    continue_edges.append(continue_edge)
 
         removed_exits = {}
         removed_entries = {}
@@ -141,7 +153,7 @@ class LoopFinder(Analysis):
                     for nodes in networkx.weakly_connected_components(subg)
                 )
                 subg = next(filter(lambda g: entry_node in g.nodes(), _subgraphs))
-        me = Loop(entry_node, entry_edges, break_edges, continue_edges, loop_body_nodes, subg, tops[:])
+        me = Loop(entry_node, entry_edges, break_edges, continue_edges, loop_body_nodes, subg, tops[:], entry_nodes)
         return me, [me, *alls]
 
     def _parse_loops_from_graph(self, graph: networkx.DiGraph):

@@ -60,8 +60,8 @@ class LoopSeer(ExplorationTechnique):
 
         if type(loops) in (list, tuple) and all(type(l) is Loop for l in loops):
             for loop in loops:
-                if loop.entry_edges:
-                    self.loops[loop.entry_edges[0][1].addr] = loop
+                for entry_edge in loop.entry_edges:
+                    self.loops[entry_edge[1].addr] = loop
 
         elif loops is not None:
             raise TypeError("Invalid type for 'loops' parameter!")
@@ -93,9 +93,8 @@ class LoopSeer(ExplorationTechnique):
             loop_finder = self.project.analyses.LoopFinder(kb=self.cfg.kb, normalize=True, functions=funcs)
 
             for loop in loop_finder.loops:
-                if loop.entry_edges:
-                    entry = loop.entry_edges[0][1]
-                    self.loops[entry.addr] = loop
+                for entry_edge in loop.entry_edges:
+                    self.loops[entry_edge[1].addr] = loop
 
     def filter(self, simgr, state, **kwargs):
         if state in self.cut_succs:
@@ -132,7 +131,9 @@ class LoopSeer(ExplorationTechnique):
                 l.debug("Loop currently active is %s with entry %s", loop, hex(header))
 
                 if succ_state.addr == header:
-                    continue_addrs = [e[0].addr for e in loop.continue_edges]
+                    # Only back edges targeting the canonical header count as iterations, so that
+                    # one iteration of a (possibly multi-entry) loop is recorded exactly once.
+                    continue_addrs = [e[0].addr for e in loop.continue_edges if e[1].addr == header]
                     # If there's only one successor, the loop is "concrete"
                     # We may wish not to cut loops that are concrete, as this can dead-end
                     # the path prematurely, even when there won't be state explosion.
@@ -212,10 +213,14 @@ class LoopSeer(ExplorationTechnique):
                 succ_state.loop_data.current_loop.append((loop, exits))
         return succs
 
-    # pylint: disable=R0201
     def _inside_current_loops(self, succ_state):
-        current_loops_addrs = [x[0].entry.addr for x in succ_state.loop_data.current_loop]
-        return succ_state.addr in current_loops_addrs
+        # A loop may have several entries (irreducible loops); the loop is considered active
+        # if its Loop object is already on the current loop stack, no matter which entry
+        # the state is at. This prevents activating the same loop twice.
+        loop = self.loops.get(succ_state.addr)
+        if loop is None:
+            return False
+        return any(loop is active_loop for active_loop, _ in succ_state.loop_data.current_loop)
 
     def _get_function(self, func):
         f = None
